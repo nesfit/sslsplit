@@ -217,6 +217,9 @@ main_usage(void)
 #else /* !HAVE_LOCAL_PROCINFO */
 "      e.g.    \"/var/log/sslsplit/%%T-%%s-%%d.log\"\n"
 #endif /* HAVE_LOCAL_PROCINFO */
+#ifdef HTTP_INJECTION_ENABLED
+"  -I          HTML code to inject into the HTTP responses. First -I defines HTTP, second HTTPS injections\n"
+#endif /* HTTP_INJECTION_ENABLED */
 "  -X pcapfile pcap log: packets to pcapfile (excludes -Y/-y)\n"
 "  -Y pcapdir  pcap log: packets to separate files in dir (excludes -X/-y)\n"
 "  -y pathspec pcap log: packets to sep files with %% subst (excl. -X/-Y):\n"
@@ -345,7 +348,11 @@ main(int argc, char *argv[])
 	while ((ch = getopt(argc, argv,
 	                    OPT_g OPT_G OPT_Z OPT_i OPT_x OPT_T OPT_I
 	                    "k:c:C:K:t:OPa:b:s:r:R:e:Eu:m:j:p:l:L:S:F:M:"
-	                    "dDVhW:w:q:f:o:X:Y:y:")) != -1) {
+	                    "dDVhW:w:q:f:o:X:Y:y:"
+#ifdef HTTP_INJECTION_ENABLED
+						"H:"
+#endif /* HTTP_INJECTION_ENABLED */
+	                    )) != -1) {
 		switch (ch) {
 			case 'f':
 				if (opts->conffile)
@@ -487,6 +494,11 @@ main(int argc, char *argv[])
 				opts_set_lprocinfo(opts);
 				break;
 #endif /* HAVE_LOCAL_PROCINFO */
+#ifdef HTTP_INJECTION_ENABLED
+			case 'H':
+				opts_set_http_injection(opts, argv0, optarg);
+				break;
+#endif /* HTTP_INJECTION_ENABLED */			
 			case 'M':
 				opts_set_masterkeylog(opts, argv0, optarg);
 				break;

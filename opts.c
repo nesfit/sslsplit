@@ -155,6 +155,14 @@ opts_free(opts_t *opts)
 		free(opts->mirrortarget);
 	}
 #endif /* !WITHOUT_MIRROR */
+#ifdef HTTP_INJECTION_ENABLED
+	if (opts->http_injection) {
+		free(opts->http_injection);
+	}
+	if (opts->https_injection && opts->https_injection != opts->http_injection) {
+		free(opts->https_injection);
+	}
+#endif /* HTTP_INJECTION_ENABLED */
 	memset(opts, 0, sizeof(opts_t));
 	free(opts);
 }
@@ -1240,6 +1248,31 @@ opts_set_mirrortarget(opts_t *opts, const char *argv0, const char *optarg)
 #endif /* DEBUG_OPTS */
 }
 #endif /* !WITHOUT_MIRROR */
+
+#ifdef HTTP_INJECTION_ENABLED
+void
+opts_set_http_injection(opts_t *opts, const char *argv0, const char *optarg)
+{
+	if (!opts->http_injection) {
+		if (!(opts->http_injection = strdup(optarg))) {
+			oom_die(argv0);
+		}
+		opts->http_injection_len = strlen(opts->http_injection);
+		opts->https_injection = opts->http_injection;
+		opts->https_injection_len = opts->http_injection_len;
+	} else {
+		if (!(opts->https_injection = strdup(optarg))) {
+			oom_die(argv0);
+		}
+		opts->https_injection_len = strlen(opts->https_injection);
+	}
+
+#ifdef DEBUG_OPTS
+	log_dbg_printf("HttpInjection: %s (%d)\n", opts->http_injection, opts->http_injection_len);
+	log_dbg_printf("HttpsInjection: %s (%d)\n", opts->https_injection, opts->https_injection_len);
+#endif /* DEBUG_OPTS */
+}
+#endif /* HTTP_INJECTION_ENABLED */
 
 void
 opts_set_daemon(opts_t *opts)

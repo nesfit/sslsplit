@@ -1,5 +1,8 @@
 ### Variable overrides
 
+# Enable HTTP injection
+FEATURES?=	-DHTTP_INJECTION_ENABLED
+
 # You can change many aspects of the build behaviour without modifying this
 # make file simply by setting environment variables.
 #

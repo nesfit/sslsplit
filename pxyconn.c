@@ -184,6 +184,19 @@ typedef struct pxy_conn_ctx {
 	pxy_thrmgr_ctx_t *thrmgr;
 	proxyspec_t *spec;
 	opts_t *opts;
+
+#ifdef HTTP_INJECTION_ENABLED
+	char *http_injection;
+	size_t http_injection_len;
+	char *https_injection;
+	size_t https_injection_len;
+	unsigned int http_injected : 1;
+	char *http_transfer_encoding;
+	char *http_resp_content_type;
+	char *http_chunk;
+	int http_chunk_len;
+	int http_chunk_bytes_read;
+#endif /* HTTP_INJECTION_ENABLED */
 } pxy_conn_ctx_t;
 
 #define WANT_CONNECT_LOG(ctx)	((ctx)->opts->connectlog||!(ctx)->opts->detach)
@@ -220,6 +233,18 @@ pxy_conn_ctx_new(proxyspec_t *spec, opts_t *opts,
 		               (void*)ctx);
 	}
 #endif /* DEBUG_PROXY */
+#ifdef HTTP_INJECTION_ENABLED
+	ctx->http_injection = opts->http_injection;
+	ctx->http_injection_len = opts->http_injection_len;
+	ctx->https_injection = opts->https_injection;
+	ctx->https_injection_len = opts->https_injection_len;
+	ctx->http_transfer_encoding = NULL;
+	ctx->http_resp_content_type = NULL;
+	ctx->http_chunk = NULL;
+	ctx->http_chunk_len = -1;
+	ctx->http_chunk_bytes_read = -1;
+#endif /* HTTP_INJECTION_ENABLED */
+
 	return ctx;
 }
 
@@ -300,6 +325,17 @@ pxy_conn_ctx_free(pxy_conn_ctx_t *ctx, int by_requestor)
 	if (ctx->sni) {
 		free(ctx->sni);
 	}
+#ifdef HTTP_INJECTION_ENABLED
+	if (ctx->http_transfer_encoding) {
+		free(ctx->http_transfer_encoding);
+	}
+	if (ctx->http_resp_content_type) {
+		free(ctx->http_resp_content_type);
+	}
+	if (ctx->http_chunk) {
+		free(ctx->http_chunk);
+	}
+#endif /* HTTP_INJECTION_ENABLED */
 	free(ctx);
 }
 
@@ -1274,6 +1310,14 @@ pxy_bufferevent_setup(pxy_conn_ctx_t *ctx, evutil_socket_t fd, SSL *ssl)
 #endif /* DEBUG_PROXY */
 	return bev;
 }
+			
+#ifdef HTTP_INJECTION_ENABLED
+static int
+pxy_con_is_ssl(pxy_conn_ctx_t *ctx) 
+{
+	return ctx->dst.ssl != NULL;
+}
+#endif /* HTTP_INJECTION_ENABLED */
 
 /*
  * Filter a single line of HTTP request headers.
@@ -1420,6 +1464,33 @@ pxy_http_resphdr_filter_line(const char *line, pxy_conn_ctx_t *ctx)
 				ctx->enomem = 1;
 				return NULL;
 			}
+#ifdef HTTP_INJECTION_ENABLED
+			// Manipulate with content length only with text/html content type
+			if (ctx->http_injection && ctx->https_injection 
+				&& ctx->http_resp_content_type && strstr(ctx->http_resp_content_type, "text/html")) {
+				const int injection_len = pxy_con_is_ssl(ctx) ? ctx->https_injection_len : ctx->http_injection_len;
+				int new_content_len = atoi(ctx->http_content_length) + injection_len;
+				char *new_ctx_http_content_len = malloc(30);
+				snprintf(new_ctx_http_content_len, 30, "Content-Length: %d", new_content_len);
+				free(ctx->http_content_length);
+				ctx->http_content_length =  strdup(util_skipws(new_ctx_http_content_len + 15));
+				return new_ctx_http_content_len;
+			}
+		} else if (!strncasecmp(line, "Transfer-Encoding:", 18)) {
+			ctx->http_transfer_encoding = strdup(util_skipws(line + 18));
+			if (!ctx->http_transfer_encoding) {
+				ctx->enomem = 1;
+				return NULL;
+			}
+		} else if (!strncasecmp(line, "Content-Security-Policy", 23)) {
+			return NULL;
+		} else if (!strncasecmp(line, "Content-Type:", 13)) {
+			ctx->http_resp_content_type = strdup(util_skipws(line + 13));
+			if (!ctx->http_resp_content_type) {
+				ctx->enomem = 1;
+				return NULL;
+			}
+#endif /* HTTP_INJECTION_ENABLED */					
 		} else if (
 		    /* HPKP: Public Key Pinning Extension for HTTP
 		     * (draft-ietf-websec-key-pinning)
@@ -1656,6 +1727,102 @@ pxy_conn_terminate_free(pxy_conn_ctx_t *ctx, int is_requestor)
 	pxy_conn_ctx_free(ctx, is_requestor);
 }
 
+#ifdef HTTP_INJECTION_ENABLED
+/* 
+ * Inject code to the HTTP response body (after head tag)
+ * Everything not read from the input buffer will be eventually copied to the output buffer
+ */
+static void 
+pxy_con_http_inject(pxy_conn_ctx_t *ctx, struct evbuffer *inbuf, struct evbuffer *outbuf)
+{
+	if (!ctx->http_injection || !ctx->https_injection) {
+		return;
+	}
+	// Identity transfer encoding
+	if (!ctx->http_transfer_encoding || !strcmp(ctx->http_transfer_encoding, "identity")) {
+		//log_dbg_printf("identity encoding\n");
+		// Locate head tag
+		struct evbuffer_ptr head_tag_ptr = evbuffer_search(inbuf, "<head>", 6, NULL);
+		if (head_tag_ptr.pos == -1) {
+			return;
+		}
+		log_dbg_printf("Injecting ᕕ( ᐛ )ᕗ ...\n");
+		//log_dbg_printf("%s\n", ctx->dst.ssl ? "HTTPS" : "HTTP"); 
+		const char *http_injection = pxy_con_is_ssl(ctx) ? ctx->https_injection : ctx->http_injection;
+		const int http_injection_len = pxy_con_is_ssl(ctx) ? ctx->https_injection_len : ctx->http_injection_len;
+		// Copy part of the original html from beggining to end of the <head>
+		evbuffer_remove_buffer(inbuf, outbuf, head_tag_ptr.pos + 6);
+		// Inject
+		evbuffer_add(outbuf, http_injection, http_injection_len);		
+		// Rest will be copied later
+		ctx->http_injected = 1;
+	// Chunked transfer encoding
+	} else if (!strcmp(ctx->http_transfer_encoding, "chunked")) {
+		//log_dbg_printf("chunked encoding\n");
+		while (evbuffer_get_length(inbuf) > 0) {
+			// Read chunk length (if we not in the middle of a chunk body atm)
+			if (ctx->http_chunk_len == -1) {
+				char *chunk_len_str = evbuffer_readln(inbuf, NULL, EVBUFFER_EOL_CRLF);
+				if (!chunk_len_str) { 
+					log_dbg_printf("failed to read chunk len\n"); 
+					return;
+				}
+				ctx->http_chunk_len = (int)strtol(chunk_len_str, NULL, 16);		// TODO check and stuff
+				free(chunk_len_str);
+				// Last chunk
+				if (ctx->http_chunk_len == 0) {
+					//log_dbg_printf("chunk end\n");
+					ctx->http_chunk_len = -1;
+					evbuffer_add_printf(outbuf, "0\r\n");
+					return;
+				}
+			}
+			// Read (part of) chunk
+			int chunk_len_total = ctx->http_chunk_len + 2;
+			if (ctx->http_chunk == NULL) {
+				ctx->http_chunk = malloc(chunk_len_total);		// TODO check and stuff
+				ctx->http_chunk_bytes_read = 0;
+			}
+			int r = evbuffer_remove(inbuf, ctx->http_chunk + ctx->http_chunk_bytes_read, chunk_len_total - ctx->http_chunk_bytes_read);
+			if (r == -1) {
+				log_dbg_printf("failed to drain\n");		// TODO free and stuff
+				return;
+			}
+			ctx->http_chunk_bytes_read += r;
+			//log_dbg_printf("read %d bytes, %d left to read\n", r, chunk_len_total - ctx->http_chunk_len);
+			// If entire chunk was read
+			if (ctx->http_chunk_bytes_read == chunk_len_total) {
+				char *head_tag_ptr;
+				// Inject if we did not inject already and <head> tag is present
+				if (!ctx->http_injected && (head_tag_ptr = strstr(ctx->http_chunk, "<head>"))) {
+					log_dbg_printf("Injecting ᕕ( ᐛ )ᕗ ...\n");
+					log_dbg_printf("%s\n", ctx->dst.ssl ? "HTTPS" : "HTTP");
+					// Move ptr at the end of the tag
+					head_tag_ptr += 6;
+					const char *http_injection = pxy_con_is_ssl(ctx) ? ctx->https_injection : ctx->http_injection;
+					const int http_injection_len = pxy_con_is_ssl(ctx) ? ctx->https_injection_len : ctx->http_injection_len;
+					evbuffer_add_printf(outbuf, "%x\r\n", ctx->http_chunk_len + http_injection_len);
+					evbuffer_add(outbuf, ctx->http_chunk, head_tag_ptr - ctx->http_chunk);
+					evbuffer_add(outbuf, http_injection, http_injection_len);
+					evbuffer_add(outbuf, head_tag_ptr, chunk_len_total - (head_tag_ptr - ctx->http_chunk));
+					ctx->http_injected = 1;
+					return;
+				// Otherwise just copy the chunk to the output unmodified
+				} else {
+					evbuffer_add_printf(outbuf, "%x\r\n", ctx->http_chunk_len);
+					evbuffer_add(outbuf, ctx->http_chunk, chunk_len_total);
+				}
+				ctx->http_chunk = NULL;
+				ctx->http_chunk_len = -1;
+				ctx->http_chunk_bytes_read = -1;
+			}
+		}
+	} else {
+		log_dbg_printf("HTTP Transfer Encoding not implemented: %s\n", ctx->http_transfer_encoding);
+	}
+}
+#endif /* HTTP_INJECTION_ENABLED */
+
 /*
  * Callback for read events on the up- and downstream connection bufferevents.
  * Called when there is data ready in the input evbuffer.
@@ -1813,6 +1980,14 @@ pxy_bev_readcb(struct bufferevent *bev, void *arg)
 			}
 		}
 	}
+#ifdef HTTP_INJECTION_ENABLED
+	// Inject HTML to the HTTP response body (after head tag)
+	if (ctx->spec->http && ctx->seen_resp_header && (bev == ctx->dst.bev)
+		&& ctx->http_resp_content_type && strstr(ctx->http_resp_content_type, "text/html") 
+		&& !ctx->http_injected) {
+		pxy_con_http_inject(ctx, inbuf, outbuf);
+	}
+#endif /* HTTP_INJECTION_ENABLED */
 	evbuffer_add_buffer(outbuf, inbuf);
 	if (evbuffer_get_length(outbuf) >= OUTBUF_LIMIT) {
 		/* temporarily disable data source;

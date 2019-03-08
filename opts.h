@@ -123,6 +123,12 @@ typedef struct opts {
 	char *crlurl;
 	unsigned int verify_peer: 1;
 	unsigned int allow_wrong_host: 1;
+#ifdef HTTP_INJECTION_ENABLED
+	char *http_injection;
+	size_t http_injection_len;
+	char *https_injection;
+	size_t https_injection_len;
+#endif /* HTTP_INJECTION_ENABLED */
 } opts_t;
 
 void NORET oom_die(const char *) NONNULL(1);
@@ -187,6 +193,10 @@ void opts_set_pcaplogpathspec(opts_t *, const char *, const char *)
 void opts_set_mirrorif(opts_t *, const char *, const char *) NONNULL(1,2,3);
 void opts_set_mirrortarget(opts_t *, const char *, const char *) NONNULL(1,2,3);
 #endif /* !WITHOUT_MIRROR */
+#ifdef HTTP_INJECTION_ENABLED
+void opts_set_http_injection(opts_t *opts, const char *argv0, const char *optarg);
+#endif /* HTTP_INJECTION_ENABLED */
+
 void opts_set_daemon(opts_t *) NONNULL(1);
 void opts_set_debug(opts_t *) NONNULL(1);
 int opts_set_option(opts_t *, const char *, const char *, char **)
